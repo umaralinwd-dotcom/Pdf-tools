@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cursor — PDF Converter (Starter)</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;}
+    body{max-width:900px;margin:36px auto;padding:20px;line-height:1.5;color:#111}
+    h1{font-size:20px;margin-bottom:6px}
+    .card{border:1px solid #e6e6e6;padding:16px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,0.03)}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    input[type=file]{padding:6px}
+    button{padding:8px 12px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer}
+    button.primary{background:#111;color:#fff;border-color:#111}
+    #log{white-space:pre-wrap;margin-top:12px;background:#fafafa;padding:10px;border-radius:8px;border:1px dashed #eee}
+    textarea{width:100%;height:220px;margin-top:10px;padding:10px;border-radius:8px;border:1px solid #ddd}
+    .small{font-size:12px;color:#666}
+  </style>
+</head>
+<body>
+  <h1>Cursor — PDF Converter (Starter HTML)</h1>
+  <div class="card">
+    <div class="row">
+      <input id="fileInput" type="file" multiple />
+      <button id="convertBtn" class="primary">Convert selected → PDF</button>
+      <button id="extractBtn">Extract text from PDF</button>
+      <button id="clearLog">Clear</button>
+    </div>
+
+    <p class="small">Supported client-side conversions (starter): images → PDF, TXT → PDF, DOCX → PDF (via mammoth), and PDF → extracted text. More formats (PPTX, XLSX, full fidelity DOCX) need server-side processing or advanced libs.</p>
+
+    <div id="log" aria-live="polite">Ready — choose files and click an action.</div>
+    <textarea id="output" placeholder="Extracted text or preview will appear here..."></textarea>
+  </div>
+
+  <!-- Libraries (CDN) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.12/mammoth.browser.min.js"></script>
+
+  <script>
+    // Simple helper UI + conversion code
+    const { jsPDF } = window.jspdf;
+    const fileInput = document.getElementById('fileInput');
+    const convertBtn = document.getElementById('convertBtn');
+    const extractBtn = document.getElementById('extractBtn');
+    const log = document.getElementById('log');
+    const output = document.getElementById('output');
+    const clearLogBtn = document.getElementById('clearLog');
+
+    function writeLog(...args){ log.textContent += '\n' + args.join(' '); log.scrollTop = log.scrollHeight }
+    function clearLog(){ log.textContent = 'Ready — choose files and click an action.'; output.value = '' }
+    clearLogBtn.addEventListener('click', clearLog);
+
+    async function fileToArrayBuffer(file){ return await file.arrayBuffer(); }
+
+    async function convertFilesToPDF(files){
+      if(!files.length){ writeLog('No files selected'); return; }
+      // For multiple files, create a single PDF with each file on new page(s)
+      const pdf = new jsPDF({ unit:'pt', format:'a4' });
+      let first = true;
+
+      for(const file of files){
+        writeLog('Processing', file.name);
+        const type = file.type || '';
+
+        if(type.startsWith('image/')){
+          // Insert image at full page (fit keeping aspect)
+          const dataUrl = await readFileAsDataURL(file);
+          const img = new Image();
+          await new Promise((res, rej)=>{ img.onload = res; img.onerror = rej; img.src = dataUrl });
+
+          const pageW = pdf.internal.pageSize.getWidth();
+          const pageH = pdf.internal.pageSize.getHeight();
+          // fit image
+          const ratio = Math.min(pageW / img.width, pageH / img.height);
+          const w = img.width * ratio;
+          const h = img.height * ratio;
+          const x = (pageW - w) / 2;
+          const y = (pageH - h) / 2;
+          if(!first) pdf.addPage();
+          pdf.addImage(dataUrl, 'JPEG', x, y, w, h);
+
+        } else if(file.name.toLowerCase().endsWith('.txt') || type === 'text/plain'){
+          const txt = await file.text();
+          if(!first) pdf.addPage();
+          const margin = 40;
+          const lineHeight = 12;
+          const pageW = pdf.internal.pageSize.getWidth() - margin*2;
+          const lines = pdf.splitTextToSize(txt, pageW);
+          pdf.setFontSize(12);
+          pdf.text(lines, margin, 40);
+
+        } else if(file.name.toLowerCase().endsWith('.docx')){
+          // convert docx -> HTML via mammoth, then render to PDF using jsPDF.html
+          const arrayBuffer = await fileToArrayBuffer(file);
+          const result = await mammoth.convertToHtml({arrayBuffer});
+          const html = result.value;
+          // jsPDF.html is async and draws the HTML to PDF canvas
+          if(!first) pdf.addPage();
+          await pdf.html(html, { x: 20, y: 20, width: pdf.internal.pageSize.getWidth() - 40 });
+
+        } else if(file.name.toLowerCase().endsWith('.pdf') || type === 'application/pdf'){
+          // Append existing PDF pages: jsPDF can't easily import pages client-side without extra libs.
+          // We'll instead notify user and skip; proper merging requires PDF-lib or server-side.
+          writeLog('Skipping existing PDF (merge not implemented client-side):', file.name);
+
+        } else {
+          writeLog('Unsupported file type for client conversion (needs server-side):', file.name);
+        }
+
+        first = false;
+      }
+
+      // Save
+      const pdfBlob = pdf.output('blob');
+      const name = 'converted-' + Date.now() + '.pdf';
+      triggerDownload(pdfBlob, name);
+      writeLog('Done — downloaded', name);
+    }
+
+    function triggerDownload(blob, filename){
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1500);
+    }
+
+    function readFileAsDataURL(file){ return new Promise((res, rej)=>{ const r = new FileReader(); r.onload = ()=>res(r.result); r.onerror = rej; r.readAsDataURL(file); }); }
+
+    // PDF -> text extraction using pdf.js
+    async function extractTextFromPDFFiles(files){
+      output.value = '';
+      if(!files.length){ writeLog('No files selected'); return; }
+      for(const file of files){
+        if(!(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))){ writeLog('Skipping non-PDF:', file.name); continue; }
+        writeLog('Extracting text from', file.name);
+        const arrayBuffer = await fileToArrayBuffer(file);
+        const uint8 = new Uint8Array(arrayBuffer);
+        // pdf.js usage
+        const loadingTask = pdfjsLib.getDocument({data:uint8});
+        const doc = await loadingTask.promise;
+        let fullText = '';
+        for(let i=1;i<=doc.numPages;i++){
+          const page = await doc.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map(i=>i.str).join(' ');
+          fullText += `\n\n--- Page ${i} ---\n` + pageText;
+        }
+        output.value += `\n\n=== From: ${file.name} ===\n` + fullText;
+        writeLog('Finished extracting from', file.name);
+      }
+      writeLog('All done — extracted text placed in the textarea.');
+    }
+
+    // Event listeners
+    convertBtn.addEventListener('click', async ()=>{
+      writeLog('Starting conversion...');
+      const files = Array.from(fileInput.files || []);
+      try{ await convertFilesToPDF(files); }
+      catch(e){ console.error(e); writeLog('Conversion error:', e.message); }
+    });
+
+    extractBtn.addEventListener('click', async ()=>{
+      writeLog('Starting PDF text extraction...');
+      const files = Array.from(fileInput.files || []);
+      try{ await extractTextFromPDFFiles(files); }
+      catch(e){ console.error(e); writeLog('Extraction error:', e.message); }
+    });
+
+    // Set pdf.js worker (CDN) — adjust if you host locally
+    if(window.pdfjsLib){
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    }
+
+  </script>
+</body>
+</html>
